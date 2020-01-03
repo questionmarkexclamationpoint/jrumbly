@@ -1,0 +1,318 @@
+module Jrumbly
+  module Screen
+    require 'java'
+    require 'jrumbly/bus'
+    require 'jrumbly/util/non_editable_model'
+    require 'jrumbly/util/util'
+    require 'jrumbly/memory/ram'
+    require 'jrumbly/processor'
+    require 'jrumbly/screen/base'
+    require 'jrumbly/util/string'
+    
+    java_import 'javax.swing.JFrame'
+    java_import 'javax.swing.JButton'
+    java_import 'javax.swing.JPanel'
+    java_import 'javax.swing.JLabel'
+    java_import 'javax.swing.JTable'
+    java_import 'javax.swing.table.DefaultTableModel'
+    java_import 'javax.swing.JTextArea'
+    java_import 'javax.swing.JTextField'
+    java_import 'javax.swing.JScrollPane'
+    java_import 'javax.swing.JOptionPane'
+    java_import 'java.awt.BorderLayout'
+    java_import 'java.awt.FlowLayout'
+    java_import 'java.awt.GridBagLayout'
+    java_import 'java.awt.GridBagConstraints'
+    java_import 'java.awt.event.ActionListener'
+    java_import 'java.awt.Dimension'
+    
+    class SwingScreen < Base
+      def initialize(ram: nil, processor: nil, input: nil, output: nil)
+        super(ram: ram, processor: processor, input: input, output: output)
+        
+        @window = JFrame.new('jrumbly')
+        
+        @window.set_default_close_operation(JFrame::EXIT_ON_CLOSE)
+        @window.set_layout(BorderLayout.new)
+        preferred_size = Dimension.new(1200, 675)
+        @window.set_preferred_size(preferred_size)
+        
+        add_buttons
+        add_input
+        add_memory
+        @window.pack
+      end
+      def start
+        @window.set_visible(true)
+        value = !@running
+        unless @running
+          @running = true
+          @output_thread = Thread.new { fetch_output }
+          @input_thread = Thread.new { fetch_input }
+          @update_thread = Thread.new { fetch_update }
+        end
+        value
+      end
+      def stop
+        value = @running
+        if @running
+          @running = false
+          @output_thread.join
+          @input_thread.join
+          @update_thread.join
+        end
+        @window.set_visible(false)
+        value
+      end
+      def ram=(ram)
+        @ram = ram
+        refresh_ram
+      end
+      def processor=(processor)
+        @processor = processor
+        refresh_registers
+      end
+      
+      private
+      
+      def clear_ram
+        (0..(@model.get_row_count - 1)).each do |i|
+          @model.remove_row(0)
+        end
+        @model.fire_table_data_changed
+      end
+      def add_buttons
+        panel = JPanel.new
+        panel.set_layout(BorderLayout.new)
+        
+        pane = create_file_pane
+        panel.add(pane, BorderLayout::WEST)
+        
+        pane = create_button_pane
+        panel.add(pane, BorderLayout::EAST)
+        
+        @window.add(panel, BorderLayout::NORTH)
+      end
+      def create_file_pane
+        panel = JPanel.new
+        panel.set_layout(FlowLayout.new)
+        
+        button = JButton.new('Open')
+        panel.add(button)
+        
+        button = JButton.new('Save')
+        panel.add(button)
+        
+        panel
+      end
+      def create_button_pane
+        panel = JPanel.new
+        panel.set_layout(FlowLayout.new(FlowLayout::TRAILING))
+        
+        button = JButton.new('Load RAM')
+        button.add_action_listener do |e|
+          load_ram
+        end
+        panel.add(button)
+        
+        button = JButton.new('Reset')
+        button.add_action_listener do |e|
+          @processor.reset
+          refresh_registers
+          load_ram
+        end
+        panel.add(button)
+        
+        button = JButton.new('Step')
+        button.add_action_listener do |e|
+          Thread.new do
+            highlight_active_row
+            unless @processor.word.instruction == 'HALT'
+              @processor.step
+              refresh_registers
+            end
+          end
+        end
+        panel.add(button)
+        
+        button = JButton.new('Run')
+        button.add_action_listener do |e|
+          @processing = true
+          @run_thread = Thread.new do
+            highlight_active_row
+            while @processing && @processor.word.instruction != 'HALT'
+              highlight_active_row
+              @processor.step
+              refresh_registers
+            end
+          end
+        end
+        panel.add(button)
+        
+        button = JButton.new('Stop')
+        button.add_action_listener do |e|
+          @processing = false
+        end
+        panel.add(button)
+        
+        panel
+      end
+      def refresh_registers
+        @accumulator.set_text(@processor.accumulator.to_s)
+        @program_counter.set_text(@processor.program_counter.to_s)
+        @instruction.set_text(@processor.word.instruction.to_s)
+        @operand.set_text(@processor.word.operand.to_s)
+      end
+      def refresh_ram
+        clear_ram
+        i = 0
+        unless @ram.nil?
+          @ram.each do |word|
+            @model.add_row([i, word.instruction, word.operand].to_java)
+            i += 1
+          end
+        end
+        @model.fire_table_data_changed
+      end
+      def load_ram
+        @output_text.set_text('');
+        i = 0
+        @ram.reset
+        @processor.reset
+        refresh_registers
+        @input_text.get_text.each_line do |line|
+          word = Jrumbly::Util.parse_word(line)
+          unless word.nil?
+            if word.is_a?(Array)
+              location, word = word
+            else
+              location = i
+              i += 1
+            end
+            @ram[location] = word
+          end
+        end
+        refresh_ram
+      end
+      def add_memory
+        register_panel = create_register_panel
+        ram_panel = create_ram_panel
+        output_panel = create_output_panel
+        
+        memory_panel = JPanel.new
+        memory_panel.set_layout(BorderLayout.new)
+        memory_panel.add(register_panel, BorderLayout::NORTH)
+        memory_panel.add(ram_panel, BorderLayout::CENTER)
+        memory_panel.add(output_panel, BorderLayout::SOUTH)
+        
+        @window.add(memory_panel, BorderLayout::EAST)
+      end
+      def create_register_panel
+        register_panel = JPanel.new
+        register_panel.set_layout(GridBagLayout.new)
+        constraints = GridBagConstraints.new
+        constraints.fill = GridBagConstraints::HORIZONTAL
+        constraints.weightx = 1
+        constraints.weighty = 1
+        
+        constraints.gridx = 0
+        constraints.gridy = 0
+        label = JLabel.new('H')
+        register_panel.add(label, constraints)
+        
+        constraints.gridx += 1
+        label = JLabel.new('PC')
+        register_panel.add(label, constraints)
+        
+        constraints.gridx += 1
+        label = JLabel.new('IR')
+        register_panel.add(label, constraints)
+        
+        constraints.gridx += 1
+        label = JLabel.new('OR')
+        register_panel.add(label, constraints)
+        
+        constraints.gridx = 0
+        constraints.gridy += 1
+        @accumulator = JTextField.new
+        @accumulator.set_text(@processor.nil? ? '0' : @processor.accumulator.to_s)
+        @accumulator.set_editable(false)
+        register_panel.add(@accumulator, constraints)
+        
+        constraints.gridx += 1
+        @program_counter = JTextField.new
+        @program_counter.set_text(@processor.nil? ? '0' : @processor.program_counter.to_s)
+        @program_counter.set_editable(false)
+        register_panel.add(@program_counter, constraints)
+        
+        constraints.gridx += 1
+        @instruction = JTextField.new
+        @instruction.set_text(@processor.nil? ? 'HALT' : @processor.word.instruction)
+        @instruction.set_editable(false)
+        register_panel.add(@instruction, constraints)
+        
+        constraints.gridx += 1
+        @operand = JTextField.new
+        @operand.set_text(@processor.nil? ? '0' : @processor.word.operand.to_s)
+        @operand.set_editable(false)
+        register_panel.add(@operand, constraints)
+        
+        register_panel
+      end
+      def highlight_active_row   
+        @model.set_value_at(@last_row, @last_row, 0) unless
+          @last_row.nil?
+        @last_row = @processor.program_counter
+        @model.set_value_at(">>>#{@processor.program_counter}", @processor.program_counter, 0)
+        @model.fire_table_rows_updated(@processor.program_counter, @processor.program_counter)
+      end
+      def create_ram_panel
+        table = JTable.new
+        @model = NonEditableModel.new
+        @model.add_column('Address')
+        @model.add_column('Instruction')
+        @model.add_column('Operand')
+        table.set_model(@model)
+        refresh_ram
+        ram_panel = JScrollPane.new(table)
+      end
+      def add_input
+        @input_text = JTextArea.new('HALT 0')
+        pane = JScrollPane.new(@input_text)
+        @window.add(pane, BorderLayout::CENTER)
+      end
+      def create_output_panel
+        @output_text = JTextArea.new(5, 10)
+        @output_text.set_editable(false)
+        pane = JScrollPane.new(@output_text)
+        
+        pane
+      end
+      def fetch_output
+        while @running
+          value = @output.pop
+          @output_text.append("#{value}\r\n")
+        end
+      end
+      def fetch_update
+        while @running
+          value = @update.pop
+          @model.set_value_at(@ram[value].instruction, value, 1)
+          @model.set_value_at(@ram[value].operand.to_s, value, 2)
+          @model.fire_table_rows_updated(value, value)
+        end
+      end
+      def fetch_input
+        while @running
+          a = @input.pop_in
+          result = JOptionPane.show_input_dialog('Please input an integer:')
+          until result.is_i?
+            result = JOptionPane.show_input_dialog('Please input an integer:')
+          end
+          result = Memory::Word.new('DATA', result.to_i)
+          @input.push_out(result)
+        end
+      end
+    end
+  end
+end

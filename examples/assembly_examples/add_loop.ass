@@ -1,0 +1,15 @@
+read 20
+load 20
+stor 21
+load 20
+add 21
+stor 20
+load 22
+add 23
+stor 22
+jmpn 3
+writ 20
+HALT 0
+
+22 -999
+23 1
